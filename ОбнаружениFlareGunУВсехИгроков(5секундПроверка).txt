@@ -1,0 +1,391 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local pusyaFolder = ReplicatedStorage:FindFirstChild("PusyaCode")
+if not (pusyaFolder and pusyaFolder:IsA("Folder")) then
+	return
+end
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then return end
+
+local NOTIFICATION_TITLE = "!!!FlareGun detected!!!"
+local NOTIFICATION_ICON = "rbxassetid://8931895425"
+local NOTIFICATION_DURATION = 20
+local PULSE_SPEED = 4.5 -- Скорость сердцебиения
+local CHECK_INTERVAL = 5 -- Интервал проверки в секундах
+
+-- Переключение Вкл / Выкл по кругу при повторном запуске кода
+if _G.FlareGunDetectorToggleState and _G.FlareGunDetectorCleanup then
+	_G.FlareGunDetectorToggleState = false
+	pcall(_G.FlareGunDetectorCleanup)
+	_G.FlareGunDetectorCleanup = nil
+	print("Detection of FlareGuns among all players (checked every 5 seconds): 🔴 Disabled")
+	return
+end
+
+_G.FlareGunDetectorToggleState = true
+
+local replPlayersFolder = ReplicatedStorage:WaitForChild("Players")
+
+type PlayerWatchData = {
+	connections: { RBXScriptConnection },
+	lastCount: number,
+	billboard: BillboardGui?,
+	label: TextLabel?,
+	pulsePhase: number,
+}
+
+local watchedPlayers: { [string]: PlayerWatchData } = {}
+local globalConnections: { RBXScriptConnection } = {}
+local isCleanedUp = false
+
+local function getTorsoPart(playerName: string): BasePart?
+	local plr = Players:FindFirstChild(playerName)
+	local char = plr and plr.Character
+	if not char then return nil end
+
+	local torso = char:FindFirstChild("UpperTorso")
+		or char:FindFirstChild("Torso")
+		or char:FindFirstChild("LowerTorso")
+		or char:FindFirstChild("HumanoidRootPart")
+
+	if torso and torso:IsA("BasePart") then
+		return torso
+	end
+	return nil
+end
+
+local function countFlareGuns(inventoryFolder: Instance?): number
+	if not inventoryFolder then return 0 end
+
+	local count = 0
+	for _, item in ipairs(inventoryFolder:GetDescendants()) do
+		if item:IsA("ObjectValue") and item.Name == "FlareGun" then
+			count += 1
+		end
+	end
+	return count
+end
+
+local function removeTorsoLabel(data: PlayerWatchData)
+	if data.billboard and data.billboard.Parent then
+		pcall(function()
+			data.billboard:Destroy()
+		end)
+	end
+	data.billboard = nil
+	data.label = nil
+end
+
+local function ensureTorsoLabel(playerName: string, data: PlayerWatchData)
+	local torso = getTorsoPart(playerName)
+	if not torso then
+		removeTorsoLabel(data)
+		return
+	end
+
+	if data.billboard and data.billboard.Parent and data.label and data.label.Parent then
+		data.billboard.Adornee = torso
+		return
+	end
+
+	removeTorsoLabel(data)
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Name = "FlareGunHeartLabelGui"
+	billboard.Adornee = torso
+	billboard.Size = UDim2.fromOffset(180, 46)
+	billboard.StudsOffset = Vector3.zero
+	billboard.AlwaysOnTop = true
+	billboard.MaxDistance = 1500
+	billboard.Parent = torso
+
+	local label = Instance.new("TextLabel")
+	label.Name = "FlareGunHeartText"
+	label.AnchorPoint = Vector2.new(0.5, 0.5)
+	label.Position = UDim2.fromScale(0.5, 0.5)
+	label.Size = UDim2.fromScale(0.85, 0.85)
+	label.BackgroundTransparency = 1
+	label.Text = "FlareGun"
+	label.Font = Enum.Font.GothamBlack
+	label.TextColor3 = Color3.fromRGB(255, 25, 25)
+	label.TextStrokeColor3 = Color3.fromRGB(0, 0, 0)
+	label.TextStrokeTransparency = 0
+	label.TextScaled = true
+	label.Parent = billboard
+
+	data.billboard = billboard
+	data.label = label
+end
+
+local function sendFlareGunNotification(playerName: string, quantity: number)
+	local description = string.format(
+		"We have detected a flare gun (Quantity: %d) in the possession of player @%s. Please investigate their actions",
+		quantity,
+		playerName
+	)
+
+	pcall(function()
+		StarterGui:SetCore("SendNotification", {
+			Title = NOTIFICATION_TITLE,
+			Text = description,
+			Icon = NOTIFICATION_ICON,
+			Duration = NOTIFICATION_DURATION,
+		})
+	end)
+end
+
+local function cleanupPlayerWatch(playerName: string)
+	local data = watchedPlayers[playerName]
+	if not data then return end
+
+	for _, conn in ipairs(data.connections) do
+		conn:Disconnect()
+	end
+	table.clear(data.connections)
+
+	removeTorsoLabel(data)
+	watchedPlayers[playerName] = nil
+end
+
+local function evaluateInventory(playerName: string, inventoryFolder: Instance?, triggerAlertOnIncrease: boolean)
+	-- Не реагируем на самого себя
+	if playerName == LocalPlayer.Name then
+		return
+	end
+
+	local data = watchedPlayers[playerName]
+	if not data then return end
+
+	-- Проверяем, что игрок реально присутствует на сервере
+	if not Players:FindFirstChild(playerName) then
+		data.lastCount = 0
+		removeTorsoLabel(data)
+		return
+	end
+
+	local newCount = countFlareGuns(inventoryFolder)
+	local oldCount = data.lastCount
+	data.lastCount = newCount
+
+	if newCount > 0 then
+		ensureTorsoLabel(playerName, data)
+		if triggerAlertOnIncrease and newCount > oldCount then
+			sendFlareGunNotification(playerName, newCount)
+		end
+	else
+		removeTorsoLabel(data)
+	end
+end
+
+local function runPeriodicServerCheck()
+	if isCleanedUp then return end
+
+	for _, plr in ipairs(Players:GetPlayers()) do
+		if plr.Name ~= LocalPlayer.Name then
+			local playerName = plr.Name
+			local folder = replPlayersFolder:FindFirstChild(playerName)
+			if folder then
+				if not watchedPlayers[playerName] then
+					watchPlayerFolder(folder)
+				else
+					local inv = folder:FindFirstChild("Inventory")
+					evaluateInventory(playerName, inv, true)
+				end
+			end
+		end
+	end
+end
+
+local function attachInventoryListeners(playerName: string, data: PlayerWatchData, inventoryFolder: Instance)
+	local function onInventoryChanged()
+		evaluateInventory(playerName, inventoryFolder, true)
+	end
+
+	table.insert(data.connections, inventoryFolder.ChildAdded:Connect(function(child)
+		if child:IsA("ObjectValue") and child.Name == "FlareGun" then
+			onInventoryChanged()
+		end
+	end))
+
+	table.insert(data.connections, inventoryFolder.ChildRemoved:Connect(function(child)
+		if child:IsA("ObjectValue") and child.Name == "FlareGun" then
+			onInventoryChanged()
+		end
+	end))
+
+	table.insert(data.connections, inventoryFolder.DescendantAdded:Connect(function(desc)
+		if desc:IsA("ObjectValue") and desc.Name == "FlareGun" then
+			onInventoryChanged()
+		end
+	end))
+
+	table.insert(data.connections, inventoryFolder.DescendantRemoving:Connect(function(desc)
+		if desc:IsA("ObjectValue") and desc.Name == "FlareGun" then
+			onInventoryChanged()
+		end
+	end))
+
+	evaluateInventory(playerName, inventoryFolder, true)
+end
+
+function watchPlayerFolder(playerFolder: Instance)
+	local playerName = playerFolder.Name
+	if playerName == LocalPlayer.Name then
+		cleanupPlayerWatch(playerName)
+		return
+	end
+
+	cleanupPlayerWatch(playerName)
+
+	local data: PlayerWatchData = {
+		connections = {},
+		lastCount = 0,
+		billboard = nil,
+		label = nil,
+		pulsePhase = 0,
+	}
+	watchedPlayers[playerName] = data
+
+	local function bindCharacter(char: Model)
+		if data.lastCount > 0 then
+			ensureTorsoLabel(playerName, data)
+		end
+		table.insert(data.connections, char.AncestryChanged:Connect(function(_, parent)
+			if not parent then
+				removeTorsoLabel(data)
+			elseif data.lastCount > 0 then
+				ensureTorsoLabel(playerName, data)
+			end
+		end))
+	end
+
+	local serverPlayer = Players:FindFirstChild(playerName)
+	if serverPlayer then
+		if serverPlayer.Character then
+			bindCharacter(serverPlayer.Character)
+		end
+		table.insert(data.connections, serverPlayer.CharacterAdded:Connect(bindCharacter))
+		table.insert(data.connections, serverPlayer.CharacterRemoving:Connect(function()
+			removeTorsoLabel(data)
+		end))
+	end
+
+	local function bindInventory(inv: Instance)
+		attachInventoryListeners(playerName, data, inv)
+	end
+
+	local existingInv = playerFolder:FindFirstChild("Inventory")
+	if existingInv then
+		bindInventory(existingInv)
+	end
+
+	table.insert(data.connections, playerFolder.ChildAdded:Connect(function(child)
+		if child.Name == "Inventory" then
+			bindInventory(child)
+		elseif child.Name == "FlareGun" then
+			local inv = playerFolder:FindFirstChild("Inventory")
+			evaluateInventory(playerName, inv, true)
+		end
+	end))
+
+	table.insert(data.connections, playerFolder.ChildRemoved:Connect(function(child)
+		if child.Name == "Inventory" then
+			evaluateInventory(playerName, nil, false)
+		end
+	end))
+end
+
+-- Подключаем слежку для текущих игроков на сервере (кроме себя)
+for _, plr in ipairs(Players:GetPlayers()) do
+	if plr.Name ~= LocalPlayer.Name then
+		local folder = replPlayersFolder:FindFirstChild(plr.Name)
+		if folder then
+			watchPlayerFolder(folder)
+		end
+	end
+end
+
+-- Цикл проверки каждые 5 секунд для всех игроков на сервере (кроме себя)
+task.spawn(function()
+	while not isCleanedUp do
+		task.wait(CHECK_INTERVAL)
+		if isCleanedUp then break end
+		runPeriodicServerCheck()
+	end
+end)
+
+-- Когда заходит новый игрок на сервер, начинаем следить за его папкой в ReplicatedStorage.Players
+table.insert(globalConnections, Players.PlayerAdded:Connect(function(plr)
+	if plr.Name == LocalPlayer.Name then return end
+	local folder = replPlayersFolder:FindFirstChild(plr.Name) or replPlayersFolder:WaitForChild(plr.Name, 10)
+	if folder and Players:FindFirstChild(plr.Name) then
+		watchPlayerFolder(folder)
+	end
+end))
+
+-- Если папка игрока появится в ReplicatedStorage.Players позже
+table.insert(globalConnections, replPlayersFolder.ChildAdded:Connect(function(child)
+	if child.Name == LocalPlayer.Name then return end
+	if Players:FindFirstChild(child.Name) then
+		watchPlayerFolder(child)
+	end
+end))
+
+-- При выходе игрока с сервера чистим всё связанное с ним
+table.insert(globalConnections, Players.PlayerRemoving:Connect(function(plr)
+	cleanupPlayerWatch(plr.Name)
+end))
+
+table.insert(globalConnections, replPlayersFolder.ChildRemoved:Connect(function(child)
+	cleanupPlayerWatch(child.Name)
+end))
+
+-- Плавное сердцебиение красного текста "FlareGun" внутри туловища
+table.insert(globalConnections, RunService.RenderStepped:Connect(function(dt: number)
+	for playerName, data in pairs(watchedPlayers) do
+		if playerName ~= LocalPlayer.Name and data.lastCount > 0 then
+			if not Players:FindFirstChild(playerName) then
+				data.lastCount = 0
+				removeTorsoLabel(data)
+			else
+				ensureTorsoLabel(playerName, data)
+				if data.label and data.billboard then
+					data.pulsePhase = (data.pulsePhase + dt * PULSE_SPEED) % (math.pi * 2)
+					-- Двойной мягкий удар в стиле сердцебиения
+					local beat1 = math.max(0, math.sin(data.pulsePhase)) ^ 2
+					local beat2 = math.max(0, math.sin(data.pulsePhase - 0.85)) ^ 4 * 0.55
+					local pulse = math.clamp(beat1 + beat2, 0, 1)
+
+					local scale = 0.8 + pulse * 0.25
+					data.label.Size = UDim2.fromScale(scale, scale)
+
+					-- Лёгкое плавное переливание красного оттенка при ударе
+					local greenChannel = math.floor(15 + pulse * 45)
+					data.label.TextColor3 = Color3.fromRGB(255, greenChannel, greenChannel)
+				end
+			end
+		elseif data.billboard or data.label then
+			removeTorsoLabel(data)
+		end
+	end
+end))
+
+_G.FlareGunDetectorCleanup = function()
+	isCleanedUp = true
+
+	for _, conn in ipairs(globalConnections) do
+		conn:Disconnect()
+	end
+	table.clear(globalConnections)
+
+	for playerName in pairs(watchedPlayers) do
+		cleanupPlayerWatch(playerName)
+	end
+end
+
+print("Detection of FlareGuns among all players (checked every 5 seconds): 🟢 Enabled")

@@ -1,0 +1,314 @@
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local pusyaFolder = ReplicatedStorage:FindFirstChild("PusyaCode")
+if not (pusyaFolder and pusyaFolder:IsA("Folder")) then
+	return
+end
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then return end
+
+local HITBOX_TEXTURE = "rbxassetid://118435609581479"
+
+local TOGGLE_ATTR = "PlayerHitboxState"
+local RUN_ID_ATTR = "PlayerHitboxRunId"
+
+local stateFolder = ReplicatedStorage:FindFirstChild("PlayerHitboxFolder")
+if not stateFolder then
+	stateFolder = Instance.new("Folder")
+	stateFolder.Name = "PlayerHitboxFolder"
+	stateFolder.Parent = ReplicatedStorage
+end
+
+local nextState = not (stateFolder:GetAttribute(TOGGLE_ATTR) == true)
+local runId = (stateFolder:GetAttribute(RUN_ID_ATTR) or 0) + 1
+
+stateFolder:SetAttribute(TOGGLE_ATTR, nextState)
+stateFolder:SetAttribute(RUN_ID_ATTR, runId)
+
+print(nextState and "A square hitbox made from chicken photo textures: 🟢 Enabled" or "A square hitbox made from chicken photo textures: 🔴 Disabled")
+
+local function isActiveRun(): boolean
+	return stateFolder:GetAttribute(TOGGLE_ATTR) == true
+		and stateFolder:GetAttribute(RUN_ID_ATTR) == runId
+end
+
+local FACES = {
+	Enum.NormalId.Front,
+	Enum.NormalId.Back,
+	Enum.NormalId.Left,
+	Enum.NormalId.Right,
+	Enum.NormalId.Top,
+	Enum.NormalId.Bottom,
+}
+
+local BODY_PART_NAMES: { [string]: boolean } = {
+	Head = true,
+	Torso = true,
+	UpperTorso = true,
+	LowerTorso = true,
+	["Left Arm"] = true,
+	["Right Arm"] = true,
+	LeftUpperArm = true,
+	LeftLowerArm = true,
+	LeftHand = true,
+	RightUpperArm = true,
+	RightLowerArm = true,
+	RightHand = true,
+	["Left Leg"] = true,
+	["Right Leg"] = true,
+	LeftUpperLeg = true,
+	LeftLowerLeg = true,
+	LeftFoot = true,
+	RightUpperLeg = true,
+	RightLowerLeg = true,
+	RightFoot = true,
+}
+
+type HitboxPair = {
+	target: BasePart,
+	box: Part,
+}
+
+local hitboxFolder: Folder? = nil
+local playerPairs: { [Player]: { HitboxPair } } = {}
+local playerConns: { [Player]: { RBXScriptConnection } } = {}
+local globalConns: { RBXScriptConnection } = {}
+
+local function isBodyPart(part: Instance, char: Model): boolean
+	if not part:IsA("BasePart") then
+		return false
+	end
+	if part.Parent ~= char then
+		return false
+	end
+	if part:FindFirstAncestorOfClass("Accessory") or part:FindFirstAncestorOfClass("Tool") then
+		return false
+	end
+	return BODY_PART_NAMES[part.Name] == true
+end
+
+local function clearPlayerHitboxes(plr: Player)
+	local pairsList = playerPairs[plr]
+	if pairsList then
+		for _, pair in ipairs(pairsList) do
+			if pair.box and pair.box.Parent then
+				pcall(function()
+					pair.box:Destroy()
+				end)
+			end
+		end
+		playerPairs[plr] = nil
+	end
+end
+
+local function disconnectPlayerConns(plr: Player)
+	local conns = playerConns[plr]
+	if conns then
+		for _, conn in ipairs(conns) do
+			conn:Disconnect()
+		end
+		playerConns[plr] = nil
+	end
+end
+
+local function cleanupAll()
+	for _, conn in ipairs(globalConns) do
+		conn:Disconnect()
+	end
+	table.clear(globalConns)
+
+	for plr in pairs(playerConns) do
+		disconnectPlayerConns(plr)
+	end
+
+	for plr in pairs(playerPairs) do
+		clearPlayerHitboxes(plr)
+	end
+
+	if hitboxFolder and hitboxFolder.Parent then
+		pcall(function()
+			hitboxFolder:Destroy()
+		end)
+	end
+	hitboxFolder = nil
+end
+
+if not nextState then
+	local oldFolder = workspace:FindFirstChild("LocalPlayerHitboxesDisplay")
+	if oldFolder then
+		pcall(function()
+			oldFolder:Destroy()
+		end)
+	end
+	cleanupAll()
+	return
+end
+
+local oldFolder = workspace:FindFirstChild("LocalPlayerHitboxesDisplay")
+if oldFolder then
+	pcall(function()
+		oldFolder:Destroy()
+	end)
+end
+cleanupAll()
+
+local container = Instance.new("Folder")
+container.Name = "LocalPlayerHitboxesDisplay"
+container.Parent = workspace
+hitboxFolder = container
+
+local function createBoxForPart(plr: Player, part: BasePart)
+	if not isActiveRun() or not hitboxFolder then return end
+
+	playerPairs[plr] = playerPairs[plr] or {}
+	for _, existing in ipairs(playerPairs[plr]) do
+		if existing.target == part and existing.box and existing.box.Parent then
+			return
+		end
+	end
+
+	local box = Instance.new("Part")
+	box.Name = plr.Name .. "_" .. part.Name .. "_Hitbox"
+	box.Shape = Enum.PartType.Block
+	box.Size = part.Size
+	box.CFrame = part.CFrame
+	box.Anchored = true
+	box.CanCollide = false
+	box.CanTouch = false
+	box.CanQuery = false
+	box.CastShadow = false
+	box.Massless = true
+	box.Transparency = 1
+
+	for _, normalId in ipairs(FACES) do
+		local surfaceGui = Instance.new("SurfaceGui")
+		surfaceGui.Name = "HitboxXRay_" .. normalId.Name
+		surfaceGui.Face = normalId
+		surfaceGui.AlwaysOnTop = true
+		surfaceGui.LightInfluence = 0
+		surfaceGui.SizingMode = Enum.SurfaceGuiSizingMode.PixelsPerStud
+		surfaceGui.PixelsPerStud = 50
+		surfaceGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+		surfaceGui.Parent = box
+
+		local image = Instance.new("ImageLabel")
+		image.Name = "Texture"
+		image.Size = UDim2.fromScale(1, 1)
+		image.BackgroundTransparency = 1
+		image.Image = HITBOX_TEXTURE
+		image.ScaleType = Enum.ScaleType.Stretch
+		image.Parent = surfaceGui
+	end
+
+	box.Parent = hitboxFolder
+	table.insert(playerPairs[plr], {
+		target = part,
+		box = box,
+	})
+end
+
+local function applyCharacterHitboxes(plr: Player, char: Model)
+	clearPlayerHitboxes(plr)
+	if not isActiveRun() then return end
+
+	for _, child in ipairs(char:GetChildren()) do
+		if isBodyPart(child, char) then
+			createBoxForPart(plr, child :: BasePart)
+		end
+	end
+end
+
+local function setupPlayer(plr: Player)
+	if plr == LocalPlayer then return end
+	disconnectPlayerConns(plr)
+	clearPlayerHitboxes(plr)
+
+	local conns: { RBXScriptConnection } = {}
+	playerConns[plr] = conns
+
+	local function bindCharacter(char: Model)
+		applyCharacterHitboxes(plr, char)
+
+		local childAddedConn = char.ChildAdded:Connect(function(child)
+			if not isActiveRun() then return end
+			if isBodyPart(child, char) then
+				createBoxForPart(plr, child :: BasePart)
+			end
+		end)
+		table.insert(conns, childAddedConn)
+	end
+
+	if plr.Character then
+		bindCharacter(plr.Character)
+	end
+
+	local charAddedConn = plr.CharacterAdded:Connect(function(char)
+		if not isActiveRun() then return end
+		task.defer(function()
+			if isActiveRun() and plr.Character == char then
+				bindCharacter(char)
+			end
+		end)
+	end)
+	table.insert(conns, charAddedConn)
+
+	local charRemovingConn = plr.CharacterRemoving:Connect(function()
+		clearPlayerHitboxes(plr)
+	end)
+	table.insert(conns, charRemovingConn)
+end
+
+for _, plr in ipairs(Players:GetPlayers()) do
+	if plr ~= LocalPlayer then
+		setupPlayer(plr)
+	end
+end
+
+table.insert(globalConns, Players.PlayerAdded:Connect(function(plr)
+	if not isActiveRun() then return end
+	setupPlayer(plr)
+end))
+
+table.insert(globalConns, Players.PlayerRemoving:Connect(function(plr)
+	disconnectPlayerConns(plr)
+	clearPlayerHitboxes(plr)
+end))
+
+table.insert(globalConns, RunService.RenderStepped:Connect(function()
+	if not isActiveRun() then
+		cleanupAll()
+		return
+	end
+
+	for plr, pairsList in pairs(playerPairs) do
+		local char = plr.Character
+		if not char or not char.Parent then
+			clearPlayerHitboxes(plr)
+		else
+			for i = #pairsList, 1, -1 do
+				local pair = pairsList[i]
+				if pair.target and pair.target.Parent == char and pair.box and pair.box.Parent then
+					pair.box.Size = pair.target.Size
+					pair.box.CFrame = pair.target.CFrame
+				else
+					if pair.box and pair.box.Parent then
+						pcall(function()
+							pair.box:Destroy()
+						end)
+					end
+					table.remove(pairsList, i)
+				end
+			end
+		end
+	end
+end))
+
+table.insert(globalConns, stateFolder:GetAttributeChangedSignal(TOGGLE_ATTR):Connect(function()
+	if not isActiveRun() then
+		cleanupAll()
+	end
+end))
